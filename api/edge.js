@@ -1,6 +1,6 @@
 // api/edge.js — Vercel Edge Function with resilient EPG caching via Upstash Redis
-// Uses Upstash Redis REST (compatible with @vercel/kv interface)
-// Free tier: 10k commands/day — fits 10 customers × 6 fetches/day + reads
+// Only caches valid XML responses (starts with '<')
+// Uses Upstash Redis REST via @vercel/kv createClient
 
 import { createClient } from '@vercel/kv';
 
@@ -36,6 +36,10 @@ async function isAllowedHost(host) {
   if (ALLOWED_HOSTS.includes(host)) return true;
   if (host.endsWith('.lowdefpirate.link')) return true;
   return false;
+}
+
+function isValidXml(text) {
+  return text && text.trim().startsWith('<');
 }
 
 async function fetchEpgFromSource() {
@@ -107,7 +111,7 @@ export default async (req) => {
       const now = Date.now();
       const fetchedAtMs = fetchedAt ? parseInt(fetchedAt, 10) : 0;
       const age = now - fetchedAtMs;
-      const isFresh = cachedXml && age < CACHE_TTL * 1000;
+      const isFresh = cachedXml && isValidXml(cachedXml) && age < CACHE_TTL * 1000;
       const failureCount = parseInt(failures, 10) || 0;
       
       if (isFresh) {
@@ -116,7 +120,7 @@ export default async (req) => {
       
       const freshXml = await fetchEpgFromSource();
       
-      if (freshXml && freshXml.trim().startsWith('<')) {
+      if (freshXml && isValidXml(freshXml)) {
         await Promise.all([
           kv.set(KV_KEYS.epg, freshXml),
           kv.set(KV_KEYS.fetchedAt, now.toString()),
@@ -128,14 +132,16 @@ export default async (req) => {
       const newFailures = failureCount + 1;
       await kv.set(KV_KEYS.failures, newFailures.toString());
       
-      if (cachedXml) {
+      // Only serve cached data if it's valid XML (not cached error page)
+      if (cachedXml && isValidXml(cachedXml)) {
         const cacheStatus = newFailures >= MAX_FAILURES ? 'STALE-FALLBACK' : 'STALE';
         return serveXml(cachedXml, cacheStatus);
       }
       
+      // No valid cached data
       if (newFailures >= MAX_FAILURES) {
         const directXml = await fetchEpgFromSource();
-        if (directXml && directXml.trim().startsWith('<')) {
+        if (directXml && isValidXml(directXml)) {
           return serveXml(directXml, 'DIRECT');
         }
       }
@@ -145,7 +151,7 @@ export default async (req) => {
     } catch (e) {
       console.error('EPG handler error:', e);
       const cachedXml = await kv.get(KV_KEYS.epg).catch(() => null);
-      if (cachedXml) return serveXml(cachedXml, 'ERROR-STALE');
+      if (cachedXml && isValidXml(cachedXml)) return serveXml(cachedXml, 'ERROR-STALE');
       return new Response('EPG unavailable', { status: 503 });
     }
   }
