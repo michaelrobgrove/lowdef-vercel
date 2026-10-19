@@ -1,12 +1,18 @@
 {
-  "name":"lowdef-vercel",
-  "version":2,
-  "framework":"nextjs",
-  "routes":[
-    {"src":"/health","dest":"/api/edge.js"},
-    {"src":"/epg/(.*)","dest":"/api/edge.js"},
-    {"src":"/(.*)","dest":"/api/edge.js"}
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "framework": null,
+  "functions": {
+    "api/**/*.js": {
+      "runtime": "edge"
+    }
+  },
+  "routes": [
+    { "src": "/health", "dest": "/api/edge.js" },
+    { "src": "/epg/(.*)", "dest": "/api/edge.js" },
+    { "src": "/(.*)", "dest": "/api/edge.js" }
   ],
-  "env":{"MYEPG_URL":"https://myepg.top/epg/guide.xml"},
-  "$schema":"https://openapi.vercel.sh/vercel.json"
+  "env": {
+    "MYEPG_URL": "https://myepg.top/epg/guide.xml"
+  }
 }
