@@ -104,6 +104,18 @@ export default async (req) => {
     const url = new URL(req.url);
     const host = req.headers.get('host') || '';
 
+    // Debug endpoint
+    if (url.pathname === '/debug') {
+      return new Response(JSON.stringify({
+        host,
+        pathname: url.pathname,
+        kvUrl: UPSTASH_URL ? 'set' : 'missing',
+        kvToken: UPSTASH_TOKEN ? 'set' : 'missing',
+        allowedHosts: ALLOWED_HOSTS,
+        isAllowed: isAllowedHost(host),
+      }, null, 2), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+
     // Health
     if (url.pathname === '/health' || url.pathname === '/health.php') {
       return new Response('OK', { status: 200, headers: { 'content-type': 'text/plain' } });
