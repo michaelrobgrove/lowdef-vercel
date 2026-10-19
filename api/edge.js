@@ -1,19 +1,6 @@
-// api/edge.js — Vercel Edge Function with resilient EPG caching via Upstash Redis
+// api/edge.js — Vercel Edge Function with resilient EPG caching via Upstash Redis REST
+// Direct REST calls (no @vercel/kv build dependency)
 // Only caches valid XML responses (starts with '<?xml' or '<tv')
-// Uses Upstash Redis REST via @vercel/kv createClient
-
-import { createClient } from '@vercel/kv';
-
-let kv;
-try {
-  kv = createClient({
-    url: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL,
-    token: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN,
-  });
-} catch (e) {
-  console.error('KV init failed:', e);
-  kv = null;
-}
 
 const ALLOWED_HOSTS = [
   'legacy.lowdefpirate.link',
@@ -36,6 +23,42 @@ const KV_KEYS = {
   fetchedAt: 'epg:fetchedAt',
   failures: 'epg:failures',
 };
+
+// Upstash REST config
+const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
+
+async function kvGet(key) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
+  const res = await fetch(`${UPSTASH_URL}/get/${encodeURIComponent(key)}`, {
+    headers: { 'Authorization': `Bearer ${UPSTASH_TOKEN}` },
+  }).catch(() => null);
+  if (!res || !res.ok) return null;
+  const data = await res.json().catch(() => null);
+  return data?.result ?? null;
+}
+
+async function kvSet(key, value) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return false;
+  const res = await fetch(`${UPSTASH_URL}/set/${encodeURIComponent(key)}`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${UPSTASH_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify([value]),
+  }).catch(() => null);
+  return res?.ok ?? false;
+}
+
+async function kvDel(key) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return false;
+  const res = await fetch(`${UPSTASH_URL}/del/${encodeURIComponent(key)}`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${UPSTASH_TOKEN}` },
+  }).catch(() => null);
+  return res?.ok ?? false;
+}
 
 function isAllowedHost(host) {
   if (!host) return false;
@@ -100,6 +123,10 @@ function serveXml(xml, cacheStatus) {
   });
 }
 
+function serveError(status, msg, cacheStatus) {
+  return new Response(msg, { status, headers: { 'content-type': 'text/plain', 'x-vercel-cache': cacheStatus } });
+}
+
 export default async (req) => {
   try {
     const url = new URL(req.url);
@@ -112,75 +139,71 @@ export default async (req) => {
 
     // EPG endpoints
     if (url.pathname.startsWith('/epg/') || url.pathname === '/epg.xml' || url.pathname === '/xmltv.php') {
-      if (!kv) {
-        // No KV - try direct fetch
+      // No KV configured - direct fetch only
+      if (!UPSTASH_URL || !UPSTASH_TOKEN) {
         const directXml = await fetchEpgFromSource();
         if (directXml && isValidXml(directXml)) return serveXml(directXml, 'DIRECT-NO-KV');
-        return new Response('EPG unavailable (no KV)', { status: 503, headers: { 'x-vercel-cache': 'NO-KV' } });
+        return serveError(503, 'EPG unavailable (no KV)', 'NO-KV');
       }
       
-      try {
-        const [cachedXml, fetchedAt, failures] = await Promise.all([
-          kv.get(KV_KEYS.epg),
-          kv.get(KV_KEYS.fetchedAt),
-          kv.get(KV_KEYS.failures).catch(() => 0),
-        ]);
-        
-        // If cached data is invalid (HTML), clear it
-        if (cachedXml && !isValidXml(cachedXml)) {
-          await kv.del(KV_KEYS.epg);
-          cachedXml = null;
-        }
-        
-        const now = Date.now();
-        const fetchedAtMs = fetchedAt ? parseInt(fetchedAt, 10) : 0;
-        const age = now - fetchedAtMs;
-        const isFresh = cachedXml && isValidXml(cachedXml) && age < CACHE_TTL * 1000;
-        const failureCount = parseInt(failures, 10) || 0;
-        
-        if (isFresh) {
-          return serveXml(cachedXml, 'HIT');
-        }
-        
-        const freshXml = await fetchEpgFromSource();
-        
-        if (freshXml && isValidXml(freshXml)) {
-          await Promise.all([
-            kv.set(KV_KEYS.epg, freshXml),
-            kv.set(KV_KEYS.fetchedAt, now.toString()),
-            kv.set(KV_KEYS.failures, '0'),
-          ]);
-          return serveXml(freshXml, 'MISS');
-        }
-        
-        const newFailures = failureCount + 1;
-        await kv.set(KV_KEYS.failures, newFailures.toString());
-        
-        if (cachedXml && isValidXml(cachedXml)) {
-          const cacheStatus = newFailures >= MAX_FAILURES ? 'STALE-FALLBACK' : 'STALE';
-          return serveXml(cachedXml, cacheStatus);
-        }
-        
-        if (newFailures >= MAX_FAILURES) {
-          const directXml = await fetchEpgFromSource();
-          if (directXml && isValidXml(directXml)) {
-            return serveXml(directXml, 'DIRECT');
-          }
-        }
-        
-        return new Response('EPG unavailable - source returned invalid data', { status: 503, headers: { 'x-vercel-cache': 'INVALID' } });
-        
-      } catch (e) {
-        console.error('EPG KV error:', e);
-        const cachedXml = await kv.get(KV_KEYS.epg).catch(() => null);
-        if (cachedXml && isValidXml(cachedXml)) return serveXml(cachedXml, 'ERROR-STALE');
-        return new Response('EPG unavailable', { status: 503 });
+      // Read KV state
+      const [cachedXml, fetchedAt, failures] = await Promise.all([
+        kvGet(KV_KEYS.epg),
+        kvGet(KV_KEYS.fetchedAt),
+        kvGet(KV_KEYS.failures).catch(() => 0),
+      ]);
+      
+      // Clear invalid cached data (HTML error pages)
+      let validCachedXml = cachedXml;
+      if (cachedXml && !isValidXml(cachedXml)) {
+        await kvDel(KV_KEYS.epg);
+        validCachedXml = null;
       }
+      
+      const now = Date.now();
+      const fetchedAtMs = fetchedAt ? parseInt(fetchedAt, 10) : 0;
+      const age = now - fetchedAtMs;
+      const isFresh = validCachedXml && age < CACHE_TTL * 1000;
+      const failureCount = parseInt(failures, 10) || 0;
+      
+      if (isFresh) {
+        return serveXml(validCachedXml, 'HIT');
+      }
+      
+      // Fetch fresh
+      const freshXml = await fetchEpgFromSource();
+      
+      if (freshXml && isValidXml(freshXml)) {
+        await Promise.all([
+          kvSet(KV_KEYS.epg, freshXml),
+          kvSet(KV_KEYS.fetchedAt, now.toString()),
+          kvSet(KV_KEYS.failures, '0'),
+        ]);
+        return serveXml(freshXml, 'MISS');
+      }
+      
+      // Fetch failed
+      const newFailures = failureCount + 1;
+      await kvSet(KV_KEYS.failures, newFailures.toString());
+      
+      if (validCachedXml) {
+        const cacheStatus = newFailures >= MAX_FAILURES ? 'STALE-FALLBACK' : 'STALE';
+        return serveXml(validCachedXml, cacheStatus);
+      }
+      
+      if (newFailures >= MAX_FAILURES) {
+        const directXml = await fetchEpgFromSource();
+        if (directXml && isValidXml(directXml)) {
+          return serveXml(directXml, 'DIRECT');
+        }
+      }
+      
+      return serveError(503, 'EPG unavailable - source returned invalid data', 'INVALID');
     }
 
     // Host gate
     if (!isAllowedHost(host)) {
-      return new Response('403 host not allowed', { status: 403, headers: { 'content-type': 'text/plain' } });
+      return serveError(403, '403 host not allowed', 'HOST-GATE');
     }
 
     // 302 redirect
@@ -189,6 +212,6 @@ export default async (req) => {
     
   } catch (e) {
     console.error('Edge function error:', e);
-    return new Response('Internal error', { status: 500 });
+    return serveError(500, 'Internal error', 'ERROR');
   }
 };

@@ -2,8 +2,5 @@
   "name": "lowdef-vercel",
   "version": "1.0.0",
   "private": true,
-  "type": "module",
-  "dependencies": {
-    "@vercel/kv": "^1.0.1"
-  }
+  "type": "module"
 }
