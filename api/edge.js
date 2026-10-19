@@ -6,13 +6,14 @@ const ALLOWED_HOSTS = [
   'legacy.lowdefpirate.link',
   'ship.lowdefpirate.link',
   'cove.lowdefpirate.link',
+  'inlet.lowdefpirate.link',
   '*.lowdefpirate.link',   // wildcard: any lowdefpirate.link sub
   'tfplus.stream',
   'northernsea.net',
   'usethisserver.link',
 ];
 const UPSTREAM = 'http://usethisserver.link';
-const EPG_SRC = 'https://myepg.top/epg/guide.xml'; // env override via VERCEL_ENV? no — use static; set via dashboard MYEPG_URL if needed
+const EPG_SRC = 'https://myepg.top/dl/ZYxXtj2qH/'; // token URL (30s expiry) — edge fetches fresh on MISS
 
 async function isAllowedHost(host) {
   if (!host) return false;
@@ -35,7 +36,7 @@ export default async (req) => {
     });
   }
 
-  // 2) EPG — fetch upstream source, cache 4h on the edge, never redirect
+  // 2) EPG — fetch upstream token URL, cache 4h on the edge, never redirect
   if (url.pathname.startsWith('/epg/') || url.pathname === '/epg.xml' || url.pathname === '/xmltv.php') {
     const res = await fetch(EPG_SRC, { cf: { cacheTtl: 14400 } }).catch(() => null);
     if (res && res.ok) {
