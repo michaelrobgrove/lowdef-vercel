@@ -17,11 +17,47 @@ const EPG_SRC = 'https://myepg.top/dl/ZYxXtj2qH/'; // token URL (30s expiry) —
 
 async function isAllowedHost(host) {
   if (!host) return false;
-  // exact match
   if (ALLOWED_HOSTS.includes(host)) return true;
-  // wildcard *.lowdefpirate.link
   if (host.endsWith('.lowdefpirate.link')) return true;
   return false;
+}
+
+// fetch EPG with redirect follow + gzip decompression
+async function fetchEpg() {
+  // First request to token URL (follows 302 automatically in Edge)
+  const res = await fetch(EPG_SRC, {
+    cf: { cacheTtl: 14400 },
+    redirect: 'follow'
+  }).catch(() => null);
+  
+  if (!res || !res.ok) return null;
+  
+  // Response is gzipped — decompress using built-in decompression
+  // Edge runtime automatically decompresses if Accept-Encoding not set
+  // But the download URL serves raw gzip — need manual decompression
+  const arrayBuffer = await res.arrayBuffer();
+  const uint8 = new Uint8Array(arrayBuffer);
+  
+  // Check if it's gzipped (magic bytes 0x1f 0x8b)
+  if (uint8.length >= 2 && uint8[0] === 0x1f && uint8[1] === 0x8b) {
+    // Decompress using DecompressionStream (Edge supports this)
+    try {
+      const blob = new Blob([uint8], { type: 'application/gzip' });
+      const decompressed = await new Response(blob).body
+        .pipeThrough(new DecompressionStream('gzip'))
+        .getReader()
+        .read();
+      // Convert to text
+      const decoder = new TextDecoder();
+      return decoder.decode(decompressed.value);
+    } catch (e) {
+      console.error('gzip decompress failed:', e);
+      return null;
+    }
+  }
+  
+  // Already text
+  return new TextDecoder().decode(uint8);
 }
 
 export default async (req) => {
@@ -38,10 +74,9 @@ export default async (req) => {
 
   // 2) EPG — fetch upstream token URL, cache 4h on the edge, never redirect
   if (url.pathname.startsWith('/epg/') || url.pathname === '/epg.xml' || url.pathname === '/xmltv.php') {
-    const res = await fetch(EPG_SRC, { cf: { cacheTtl: 14400 } }).catch(() => null);
-    if (res && res.ok) {
-      const body = await res.text();
-      return new Response(body, {
+    const xml = await fetchEpg();
+    if (xml) {
+      return new Response(xml, {
         status: 200,
         headers: {
           'content-type': 'application/xml',
