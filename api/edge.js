@@ -13,7 +13,7 @@ const ALLOWED_HOSTS = [
   'usethisserver.link',
 ];
 const UPSTREAM = 'http://usethisserver.link';
-const EPG_SRC = 'https://myepg.top/dl/ZYxXtj2qH/'; // token URL (30s expiry) — edge fetches fresh on MISS
+const EPG_SRC = 'https://myepg.top/dl/ZYxXtj2qH/';
 
 async function isAllowedHost(host) {
   if (!host) return false;
@@ -22,17 +22,47 @@ async function isAllowedHost(host) {
   return false;
 }
 
-// fetch EPG: follow redirects, request identity encoding (no gzip), cache decompressed XML
+// fetch EPG: follow redirects, request gzip, decompress
 async function fetchEpg() {
   const res = await fetch(EPG_SRC, {
     redirect: 'follow',
-    headers: { 'Accept-Encoding': 'identity' }, // request uncompressed
+    headers: { 'Accept-Encoding': 'gzip' }, // request gzip
   }).catch(() => null);
   
   if (!res || !res.ok) return null;
   
-  // Should already be uncompressed XML text
-  return await res.text();
+  const arrayBuffer = await res.arrayBuffer();
+  const uint8 = new Uint8Array(arrayBuffer);
+  
+  // Check if gzipped (magic bytes 0x1f 0x8b)
+  if (uint8.length >= 2 && uint8[0] === 0x1f && uint8[1] === 0x8b) {
+    try {
+      // Decompress using DecompressionStream (Edge supports this)
+      const blob = new Blob([uint8], { type: 'application/gzip' });
+      const ds = new DecompressionStream('gzip');
+      const writer = ds.writable.getWriter();
+      await writer.write(uint8);
+      await writer.close();
+      const reader = ds.readable.getReader();
+      const chunks = [];
+      let done = false;
+      while (!done) {
+        const { value, done: d } = await reader.read();
+        done = d;
+        if (value) chunks.push(value);
+      }
+      const all = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0));
+      let offset = 0;
+      for (const c of chunks) { all.set(c, offset); offset += c.length; }
+      return new TextDecoder().decode(all);
+    } catch (e) {
+      console.error('gzip decompress failed:', e);
+      return null;
+    }
+  }
+  
+  // Not gzipped
+  return new TextDecoder().decode(uint8);
 }
 
 export default async (req) => {
