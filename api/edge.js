@@ -4,9 +4,11 @@
 //
 // Behavior:
 //   /health*         -> 200 OK (origin probes, any host)
-//   /epg/* /epg.xml /xmltv.php -> cached XML from myepg.top token URL
-//                                (4h KV cache; serve stale on failure;
-//                                 3 consecutive failures -> direct source fallback)
+//   /epg/* /epg.xml /xmltv.php -> EPG served locally, NEVER redirected:
+//        1. myepg.top token URL (primary, 20/day limit -> hard 4h cache)
+//        2. on failure: serve stale cache (up to 7d)
+//        3. 3 consecutive primary failures -> provider EPG
+//           (UPSTREAM_EPG_URL: usethisserver.link /xmltv.php with creds)
 //   unknown host     -> 403
 //   everything else  -> 302 http://usethisserver.link + path + query (bridge contract)
 
@@ -14,13 +16,13 @@ export const config = { runtime: 'edge' };
 
 // Customer-facing domains: apex + ALL subdomains allowed.
 const ALLOWED_DOMAINS = [
-  'lowdefpirate.link',   // apex, ship, cove, inlet, legacy, *.lowdefpirate.link
-  'tfplus.stream',       // reseller zone (Cloudflare) — subdomains allowed
-  'northernsea.net',     // reseller zone (Cloudflare) — subdomains allowed
+  'lowdefpirate.link',   // apex, ship, cove, inlet, legacy
+  'tfplus.stream',       // reseller zone (Cloudflare)
+  'northernsea.net',     // reseller zone (Cloudflare)
   'usethisserver.link',
 ];
 const UPSTREAM = 'http://usethisserver.link';
-const EPG_SRC = 'https://myepg.top/dl/ZYxXtj2qH/'; // token URL; 20 fetches/day limit -> cache hard
+const PRIMARY_EPG = 'https://myepg.top/dl/ZYxXtj2qH/'; // token URL; 20/day -> cache hard
 const CACHE_TTL = 14400;        // 4h seconds
 const STALE_MAX_AGE = 604800;   // serve stale up to 7d on failure
 const MAX_FAILURES = 3;
@@ -29,8 +31,10 @@ const KV_KEYS = { epg: 'epg:xml', fetchedAt: 'epg:fetchedAt', failures: 'epg:fai
 
 const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
+// Provider EPG (users source) — set in Vercel project env (creds never in git)
+const FALLBACK_EPG = process.env.UPSTREAM_EPG_URL || '';
 
-// --- Upstash REST (documented call shapes) -------------------------------
+// --- Upstash REST ---------------------------------------------------------
 async function kvGet(key) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
   const res = await fetch(`${UPSTASH_URL}/get/${encodeURIComponent(key)}`, {
@@ -43,7 +47,6 @@ async function kvGet(key) {
 
 async function kvSet(key, value) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return false;
-  // POST /set with ["key","value"] body (value too large for URL path)
   const res = await fetch(`${UPSTASH_URL}/set`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
@@ -60,14 +63,14 @@ async function kvDel(key) {
   return res?.ok ?? false;
 }
 
-// --- host gate -----------------------------------------------------------
+// --- host gate -------------------------------------------------------------
 function isAllowedHost(host) {
   if (!host) return false;
   const h = host.toLowerCase();
   return ALLOWED_DOMAINS.some(d => h === d || h.endsWith('.' + d));
 }
 
-// --- EPG -----------------------------------------------------------------
+// --- EPG -------------------------------------------------------------------
 function isValidXml(text) {
   if (!text) return false;
   const t = text.trim();
@@ -75,9 +78,9 @@ function isValidXml(text) {
   return t.startsWith('<?xml') || t.startsWith('<tv');
 }
 
-async function fetchEpgFromSource() {
-  // source serves gzip regardless of Accept-Encoding -> detect + decompress
-  const res = await fetch(EPG_SRC, {
+// Fetch a guide URL: follows redirects, handles gzip (both sources serve gzip)
+async function fetchGuide(url) {
+  const res = await fetch(url, {
     redirect: 'follow',
     headers: { 'Accept-Encoding': 'gzip' },
   }).catch(() => null);
@@ -98,7 +101,7 @@ async function fetchEpgFromSource() {
     let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
     return new TextDecoder().decode(out);
   } catch (e) {
-    console.error('epg decompress failed:', e);
+    console.error('guide decompress failed:', e);
     return null;
   }
 }
@@ -124,7 +127,7 @@ function serveText(status, msg, cacheStatus) {
 async function handleEpg() {
   // No KV -> direct fetch only (never cache garbage)
   if (!UPSTASH_URL || !UPSTASH_TOKEN) {
-    const xml = await fetchEpgFromSource();
+    const xml = await fetchGuide(PRIMARY_EPG);
     if (xml && isValidXml(xml)) return serveXml(xml, 'DIRECT-NO-KV');
     return serveText(503, 'EPG unavailable (no KV)', 'NO-KV');
   }
@@ -144,34 +147,42 @@ async function handleEpg() {
   const age = now - (parseInt(fetchedAt, 10) || 0);
   const failureCount = parseInt(failures, 10) || 0;
 
+  // fresh cache -> serve
   if (validCached && age < CACHE_TTL * 1000) return serveXml(validCached, 'HIT');
 
-  const fresh = await fetchEpgFromSource();
-  if (fresh && isValidXml(fresh)) {
-    await kvSet(KV_KEYS.epg, fresh);
+  // 1) PRIMARY: myepg.top token URL
+  const primary = await fetchGuide(PRIMARY_EPG);
+  if (primary && isValidXml(primary)) {
+    await kvSet(KV_KEYS.epg, primary);
     await kvSet(KV_KEYS.fetchedAt, now.toString());
     await kvSet(KV_KEYS.failures, '0');
-    return serveXml(fresh, 'MISS');
+    return serveXml(primary, 'MISS');
   }
 
-  // source failed (rate limit / outage): keep counter, serve stale
+  // primary failed -> count the failure
   const newFailures = failureCount + 1;
   await kvSet(KV_KEYS.failures, String(newFailures));
 
+  // 2) FAILBACK AFTER 3 STRIKES: provider EPG (users source)
+  if (newFailures >= MAX_FAILURES && FALLBACK_EPG) {
+    const fb = await fetchGuide(FALLBACK_EPG);
+    if (fb && isValidXml(fb)) {
+      // cache provider guide too -> users keep EPG while primary is rate-limited
+      await kvSet(KV_KEYS.epg, fb);
+      await kvSet(KV_KEYS.fetchedAt, now.toString());
+      return serveXml(fb, 'FALLBACK');
+    }
+  }
+
+  // serve whatever valid stale copy we have
   if (validCached) {
     return serveXml(validCached, newFailures >= MAX_FAILURES ? 'STALE-FALLBACK' : 'STALE');
   }
 
-  // no cached copy + repeated failure -> one more direct attempt
-  if (newFailures >= MAX_FAILURES) {
-    const retry = await fetchEpgFromSource();
-    if (retry && isValidXml(retry)) return serveXml(retry, 'DIRECT');
-  }
-
-  return serveText(503, 'EPG unavailable - source returned invalid data', 'INVALID');
+  return serveText(503, 'EPG unavailable - all sources failed', 'INVALID');
 }
 
-// --- main ----------------------------------------------------------------
+// --- main ------------------------------------------------------------------
 export default async (req) => {
   try {
     const url = new URL(req.url);
@@ -185,6 +196,7 @@ export default async (req) => {
         runtime: config.runtime,
         kvUrl: !!UPSTASH_URL,
         kvToken: !!UPSTASH_TOKEN,
+        fallbackEpg: !!FALLBACK_EPG,
         allowed: isAllowedHost(host),
       }, null, 2), { status: 200, headers: { 'content-type': 'application/json' } });
     }
