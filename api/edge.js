@@ -116,7 +116,7 @@ export default async (req) => {
         // No KV - try direct fetch
         const directXml = await fetchEpgFromSource();
         if (directXml && isValidXml(directXml)) return serveXml(directXml, 'DIRECT-NO-KV');
-        return new Response('EPG unavailable (no KV)', { status: 503 });
+        return new Response('EPG unavailable (no KV)', { status: 503, headers: { 'x-vercel-cache': 'NO-KV' } });
       }
       
       try {
@@ -125,6 +125,12 @@ export default async (req) => {
           kv.get(KV_KEYS.fetchedAt),
           kv.get(KV_KEYS.failures).catch(() => 0),
         ]);
+        
+        // If cached data is invalid (HTML), clear it
+        if (cachedXml && !isValidXml(cachedXml)) {
+          await kv.del(KV_KEYS.epg);
+          cachedXml = null;
+        }
         
         const now = Date.now();
         const fetchedAtMs = fetchedAt ? parseInt(fetchedAt, 10) : 0;
@@ -162,7 +168,7 @@ export default async (req) => {
           }
         }
         
-        return new Response('EPG unavailable', { status: 503 });
+        return new Response('EPG unavailable - source returned invalid data', { status: 503, headers: { 'x-vercel-cache': 'INVALID' } });
         
       } catch (e) {
         console.error('EPG KV error:', e);
