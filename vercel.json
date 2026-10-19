@@ -1,6 +1,6 @@
 {
   "name": "lowdef-vercel",
-  "version":1,
+  "version":2,
   "framework":"other",
   "routes":[
     {"src":"/health","dest":"/api/edge.js"},
