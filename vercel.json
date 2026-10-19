@@ -1,11 +1,12 @@
 {
-  "name": "lowdef-vercel",
+  "name":"lowdef-vercel",
   "version":2,
-  "framework":"other",
+  "framework":null,
   "routes":[
     {"src":"/health","dest":"/api/edge.js"},
     {"src":"/epg/(.*)","dest":"/api/edge.js"},
     {"src":"/(.*)","dest":"/api/edge.js"}
   ],
-  "env":{"MYEPG_URL":"https://myepg.top/epg/guide.xml"}
+  "env":{"MYEPG_URL":"https://myepg.top/epg/guide.xml"},
+  "$schema":"https://openapi.vercel.sh/vercel.json"
 }
