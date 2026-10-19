@@ -8,8 +8,5 @@
     { "src": "/epg/(.*)", "dest": "/api/edge.js" },
     { "src": "/xmltv.php", "dest": "/api/edge.js" },
     { "src": "/(.*)", "dest": "/api/edge.js" }
-  ],
-  "env": {
-    "MYEPG_URL": "https://myepg.top/dl/ZYxXtj2qH/"
-  }
+  ]
 }
