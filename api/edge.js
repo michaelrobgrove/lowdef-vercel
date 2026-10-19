@@ -1,5 +1,5 @@
 // api/edge.js — Vercel Edge Function with resilient EPG caching via Upstash Redis REST
-// Direct REST calls (no @vercel/kv build dependency)
+// Simplified: no DecompressionStream (Edge may not support), fetch with identity encoding
 // Only caches valid XML responses (starts with '<?xml' or '<tv')
 
 const ALLOWED_HOSTS = [
@@ -24,7 +24,6 @@ const KV_KEYS = {
   failures: 'epg:failures',
 };
 
-// Upstash REST config
 const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
 
@@ -74,42 +73,15 @@ function isValidXml(text) {
 }
 
 async function fetchEpgFromSource() {
+  // Request identity encoding to avoid gzip issues
   const res = await fetch(EPG_SRC, {
     redirect: 'follow',
-    headers: { 'Accept-Encoding': 'gzip' },
+    headers: { 'Accept-Encoding': 'identity' },
   }).catch(() => null);
   
   if (!res || !res.ok) return null;
   
-  const arrayBuffer = await res.arrayBuffer();
-  const uint8 = new Uint8Array(arrayBuffer);
-  
-  if (uint8.length >= 2 && uint8[0] === 0x1f && uint8[1] === 0x8b) {
-    try {
-      const blob = new Blob([uint8], { type: 'application/gzip' });
-      const ds = new DecompressionStream('gzip');
-      const writer = ds.writable.getWriter();
-      await writer.write(uint8);
-      await writer.close();
-      const reader = ds.readable.getReader();
-      const chunks = [];
-      let done = false;
-      while (!done) {
-        const { value, done: d } = await reader.read();
-        done = d;
-        if (value) chunks.push(value);
-      }
-      const all = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0));
-      let offset = 0;
-      for (const c of chunks) { all.set(c, offset); offset += c.length; }
-      return new TextDecoder().decode(all);
-    } catch (e) {
-      console.error('gzip decompress failed:', e);
-      return null;
-    }
-  }
-  
-  return new TextDecoder().decode(uint8);
+  return await res.text();
 }
 
 function serveXml(xml, cacheStatus) {
