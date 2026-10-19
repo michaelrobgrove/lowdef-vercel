@@ -1,7 +1,7 @@
 {
   "name":"lowdef-vercel",
   "version":2,
-  "framework":null,
+  "framework":"nextjs",
   "routes":[
     {"src":"/health","dest":"/api/edge.js"},
     {"src":"/epg/(.*)","dest":"/api/edge.js"},
