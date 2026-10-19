@@ -8,6 +8,7 @@
     }
   },
   "routes": [
+    { "src": "/debug", "dest": "/api/edge.js" },
     { "src": "/health", "dest": "/api/edge.js" },
     { "src": "/epg/(.*)", "dest": "/api/edge.js" },
     { "src": "/xmltv.php", "dest": "/api/edge.js" },
