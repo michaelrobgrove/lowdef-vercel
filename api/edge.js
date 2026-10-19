@@ -39,7 +39,10 @@ async function isAllowedHost(host) {
 }
 
 function isValidXml(text) {
-  return text && text.trim().startsWith('<');
+  if (!text) return false;
+  const t = text.trim();
+  // Valid EPG XML starts with XML declaration or <tv root element
+  return t.startsWith('<?xml') || t.startsWith('<tv');
 }
 
 async function fetchEpgFromSource() {
